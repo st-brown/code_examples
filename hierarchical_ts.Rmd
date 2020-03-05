@@ -1,0 +1,126 @@
+---
+title: "Hierarchical Time Series Forecasting"
+output: html_notebook
+---
+
+
+Load libraries and data
+```{r}
+library(forecast)
+library(hts)
+library(ggplot2)
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(tsibble)
+library(stringr)
+MyData <-read.csv(file="grped3.csv")
+data=ts(MyData,frequency=53)
+```
+
+Define necessary functions
+```{r}
+calculate_aggregate_errors<-function(hts_error) {
+  
+  #If the calculated MAPE is infinite, change it to 100
+hts_error[is.infinite(hts_error[4,])]<-100
+  #The first value is the average error at the highest level. var1 captures the mean error at the second level,
+  #var2 at the third level, and var3 at the lowest level.
+newlist<-list(total=hts_error[[4,1]],var1=mean(hts_error[4,2:6]),var2=mean(hts_error[4,7:16]),
+              var3=mean(hts_error[4,17:ncol(hts_error)]))
+return(newlist)
+}
+
+ts2csv <- function(x,j) {
+  #function that takes a time series and saves it in CSV format
+  fname <- paste0(deparse(substitute(x)),j, ".csv")
+  readr::write_csv(tsibble::as_tsibble(x), fname)
+}
+
+```
+
+Gridsearch the various forecasting functions and aggregation methods
+```{r}
+forecasting_methods=c("arima","ets","rw")
+aggregation_methods= c("comb", "bu", "mo", "tdgsf", "tdgsa", "tdfp")
+ts_period=tsp(data)[3]
+#The number of steps ahead to forecast
+numahead<-10
+#create a list of lists to capture the errors for each forecast
+errors_meta=list()
+c<-0
+#Create hts (hierarchical time series) object
+data.hts<-hts(data,characters = c(1,1,2))
+for (method in aggregation_methods) {
+  for (fmethod in forecasting_methods) {
+    
+    errors<-list()
+    if (identical(fmethod,"ets")) {
+      #exponential time series only takes frequency of 1
+      data2<-ts(data,frequency=1)
+    } else {
+      data2<-data
+    }
+for (j in numahead:ts_period-numahead) {
+  x_i<-window(data2)
+  train<-window(data2,start=2,end=5+j/ts_period) %>% hts(characters = c(1,1,2))
+  fc<-try(forecast(train,method=method,fmethod=fmethod,h=numahead))
+  errors[[j]]<-try(accuracy.gts(window(data.hts,start=5+(j-1)/ts_period,end=5+(j+numahead)/ts_period),fc))
+  
+}
+    errors_meta[[c]]<-errors
+    c=c+1 
+  }
+}
+```
+
+Calculate and store the forecast using the best performing parameters, ARIMA for forecasting and bottom up for
+aggregation technique
+```{r}
+fmethod="arima"
+method="bu"
+numahead<-10
+mean_errors<-list()
+data.hts<-hts(data,characters = c(1,1,2))
+js<-seq(from=1,to=43)
+ts_period<- tsp(data)[3]
+forecasts<-list()
+for (j in js) {
+  train<-window(data,start=2,end=5+(j-1)/ts_period) %>% hts(characters = c(1,1,2))
+  fc<-forecast(train,method=method,fmethod=fmethod,h=numahead)
+  #forecasts[[j]]<-fc
+  e<-accuracy.gts(window(data.hts,start=5+j/ts_period,end=5+(j+numahead-1)/ts_period),fc)
+  l<-calculate_aggregate_errors(e)
+  mean_errors[[j]]<-l
+
+  fcts2_<-aggts(fc,levels=3) %>% ts(frequency=1,start=(54-j),end=(54-j+numahead))
+  
+  ts2csv(fcts2_,j)
+}
+```
+
+Try using a fourier transform to capture seasonality, similar to Facebook's Prophet time series library in python.
+In order to do this, the fourier is introduced as the exogenous (xreg) variable
+```{r}
+errors_fourier<-list()
+for (j in 0:(ts_period-numahead)) {
+
+data_f<-window(data,start=2,end=5+(j-1)/ts_period)
+
+  train<-window(data,start=2,end=5+(j-1)/ts_period) %>% hts(characters = c(1,1,2))
+  
+future <- matrix(numeric(numahead * ncol(data_f)), ncol = ncol(data_f)) %>%
+  ts(frequency = ts_period, start = tsp(data)[2] + 1 / ts_period)
+
+fc <- forecast(train,
+  h = numahead, fmethod = "arima",
+  seasonal = FALSE,
+  xreg = fourier(data_f, K = 11),
+  newxreg = fourier(future, K = 11))
+e<-accuracy.gts(window(data.hts,start=5+j/ts_period,end=5+(j+numahead-1)/ts_period),fc)
+  l<-calculate_aggregate_errors(e)
+  errors_fourier[[j]]<-l
+}
+```
+
+
